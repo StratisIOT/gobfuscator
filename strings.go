@@ -11,11 +11,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"strconv"
 )
 
 func ObfuscateStrings(gopath string) error {
 	return filepath.Walk(gopath, func(path string, info os.FileInfo, err error) error {
+		if strings.Contains(path, "vendor") {
+			return nil
+		}
 		if err != nil {
 			return err
 		}
