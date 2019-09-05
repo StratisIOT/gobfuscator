@@ -35,7 +35,7 @@ func ObfuscatePackageNames(gopath string, enc *Encrypter) error {
 		var gotAny bool
 		for dirPath := range resChan {
 			gotAny = true
-			if containsCGO(dirPath) {
+			if containsCGO(dirPath) || strings.Contains(dirPath, "vendor")  {
 				continue
 			}
 			isMain := isMainPackage(dirPath)
