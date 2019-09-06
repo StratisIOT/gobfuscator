@@ -220,7 +220,7 @@ func singleRenames(multiset map[symbolRenameReq]int) []symbolRenameReq {
 // contains assembly or CGO code, neither of which are
 // supported by the refactoring API.
 func containsUnsupportedCode(dir string) bool {
-	return containsAssembly(dir) || containsCGO(dir) || strings.Contains(dir, "vendor")
+	return containsAssembly(dir) || containsCGO(dir) || strings.Contains(dir, "github.com")
 }
 
 // containsAssembly checks if a source directory contains
