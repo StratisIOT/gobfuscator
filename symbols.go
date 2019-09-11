@@ -10,6 +10,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"golang.org/x/tools/refactor/importgraph"
@@ -25,6 +26,7 @@ type symbolRenameReq struct {
 
 func ObfuscateSymbols(gopath string, enc *Encrypter) error {
 	removeDoNotEdit(gopath)
+
 	renames, err := topLevelRenames(gopath, enc)
 	if err != nil {
 		return fmt.Errorf("top-level renames: %s", err)
@@ -32,6 +34,15 @@ func ObfuscateSymbols(gopath string, enc *Encrypter) error {
 	if err := runRenames(gopath, renames); err != nil {
 		return fmt.Errorf("top-level renaming: %s", err)
 	}
+
+	paramRenames, err := topLevelParamRenames(gopath, enc)
+	if err != nil {
+		return fmt.Errorf("top-level renames: %s", err)
+	}
+	if err := runRenames(gopath, paramRenames); err != nil {
+		return fmt.Errorf("top-level renaming: %s", err)
+	}
+
 	renames, err = methodRenames(gopath, enc)
 	if err != nil {
 		return fmt.Errorf("method renames: %s", err)
@@ -51,6 +62,48 @@ func runRenames(gopath string, renames []symbolRenameReq) error {
 		}
 	}
 	return nil
+}
+
+func topLevelParamRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
+	srcDir := filepath.Join(gopath, "src")
+	res := map[symbolRenameReq]int{}
+	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() && containsUnsupportedCode(path) {
+			return filepath.SkipDir
+		}
+		if filepath.Ext(path) != GoExtension {
+			return nil
+		}
+		pkgPath, err := filepath.Rel(srcDir, filepath.Dir(path))
+		if err != nil {
+			return err
+		}
+		set := token.NewFileSet()
+		file, err := parser.ParseFile(set, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if !IgnoreMethods[d.Name.Name] && d.Recv == nil {
+					for _, field := range d.Type.Params.List {
+						for _, name := range field.Names {
+							prefix := "\"" + pkgPath + "\"."
+							oldName := prefix + d.Name.Name + "::" + name.Name
+							newName := enc.Encrypt(name.Name)
+							res[symbolRenameReq{oldName, newName}]++
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+	return singleRenames(res), err
 }
 
 func topLevelRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
@@ -87,6 +140,7 @@ func topLevelRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 				if !IgnoreMethods[d.Name.Name] && d.Recv == nil {
 					addRes(pkgPath, d.Name.Name)
 				}
+
 			case *ast.GenDecl:
 				for _, spec := range d.Specs {
 					switch spec := spec.(type) {
@@ -134,18 +188,73 @@ func methodRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 		}
 		for _, decl := range file.Decls {
 			d, ok := decl.(*ast.FuncDecl)
-			if !ok || exclude[d.Name.Name] || d.Recv == nil {
+
+			if !ok || exclude[d.Name.Name] || d == nil {
 				continue
 			}
-			prefix := "\"" + pkgPath + "\"."
-			for _, rec := range d.Recv.List {
-				receiver := receiverString(prefix, rec)
-				if receiver == "" {
-					continue
+
+			if d.Body != nil {
+				prefix := "\"" + pkgPath + "\"."
+				for _, rec := range d.Body.List {
+					var typeName = reflect.TypeOf(rec).String()
+					if typeName == "*ast.AssignStmt" {
+						var statement = rec.(*ast.AssignStmt)
+						for _, ident := range statement.Lhs {
+							var name = ident.(*ast.Ident)
+							oldName := prefix + d.Name.Name + "::" + name.Name
+							newName := enc.Encrypt(name.Name)
+							res[symbolRenameReq{oldName, newName}]++
+						}
+					} else if typeName == "*ast.DeclStmt" {
+						var statement = rec.(*ast.DeclStmt)
+						var declaration = statement.Decl.(*ast.GenDecl)
+						for _, spec := range declaration.Specs {
+							var valueSpec = spec.(*ast.ValueSpec)
+							for _, name := range valueSpec.Names {
+								if name.Name != "_" {
+									oldName := prefix + d.Name.Name + "::" + name.Name
+									newName := enc.Encrypt(name.Name)
+									res[symbolRenameReq{oldName, newName}]++
+								}
+							}
+						}
+					} else if typeName == "*ast.ReturnStmt" {
+						var statement = rec.(*ast.ReturnStmt)
+						var results = statement.Results
+						for _, expr := range results {
+							// Ignore ast.BinaryExpr which is most likely created by this library as a string function.
+							if reflect.TypeOf(expr).String() == "*ast.Ident" {
+								var name = expr.(*ast.Ident)
+								oldName := prefix + d.Name.Name + "::" + name.Name
+								newName := enc.Encrypt(name.Name)
+								res[symbolRenameReq{oldName, newName}]++
+							} else {
+								fmt.Println("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
+								fmt.Println(reflect.TypeOf(expr))
+								fmt.Println(expr)
+								fmt.Println("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
+							}
+						}
+					} else {
+						fmt.Println("***********************************************")
+						fmt.Println(reflect.TypeOf(rec))
+						fmt.Println(rec)
+						fmt.Println("***********************************************")
+					}
 				}
-				oldName := receiver + "." + d.Name.Name
-				newName := enc.Encrypt(d.Name.Name)
-				res[symbolRenameReq{oldName, newName}]++
+			}
+
+			if d.Recv != nil {
+				prefix := "\"" + pkgPath + "\"."
+				for _, rec := range d.Recv.List {
+					receiver := receiverString(prefix, rec)
+					if receiver == "" {
+						continue
+					}
+					oldName := receiver + "." + d.Name.Name
+					newName := enc.Encrypt(d.Name.Name)
+					res[symbolRenameReq{oldName, newName}]++
+				}
 			}
 		}
 		return nil
