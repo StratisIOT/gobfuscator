@@ -35,14 +35,6 @@ func ObfuscateSymbols(gopath string, enc *Encrypter) error {
 		return fmt.Errorf("top-level renaming: %s", err)
 	}
 
-	paramRenames, err := topLevelParamRenames(gopath, enc)
-	if err != nil {
-		return fmt.Errorf("top-level renames: %s", err)
-	}
-	if err := runRenames(gopath, paramRenames); err != nil {
-		return fmt.Errorf("top-level renaming: %s", err)
-	}
-
 	renames, err = methodRenames(gopath, enc)
 	if err != nil {
 		return fmt.Errorf("method renames: %s", err)
@@ -50,6 +42,15 @@ func ObfuscateSymbols(gopath string, enc *Encrypter) error {
 	if err := runRenames(gopath, renames); err != nil {
 		return fmt.Errorf("method renaming: %s", err)
 	}
+
+	renames, err = topLevelParamRenames(gopath, enc)
+	if err != nil {
+		return fmt.Errorf("top-level renames: %s", err)
+	}
+	if err := runRenames(gopath, renames); err != nil {
+		return fmt.Errorf("top-level renaming: %s", err)
+	}
+
 	return nil
 }
 
@@ -57,8 +58,12 @@ func runRenames(gopath string, renames []symbolRenameReq) error {
 	ctx := build.Default
 	ctx.GOPATH = gopath
 	for _, r := range renames {
+		fmt.Println(r.OldName)
+		fmt.Println(r.NewName)
 		if err := rename.Main(&ctx, "", r.OldName, r.NewName); err != nil {
-			return err
+			// Simply print this error for now.
+			// If anything seriously wrong happens, it causes a panic anyway.
+			fmt.Println(err)
 		}
 	}
 	return nil
@@ -200,10 +205,14 @@ func methodRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 					if typeName == "*ast.AssignStmt" {
 						var statement = rec.(*ast.AssignStmt)
 						for _, ident := range statement.Lhs {
-							var name = ident.(*ast.Ident)
-							oldName := prefix + d.Name.Name + "::" + name.Name
-							newName := enc.Encrypt(name.Name)
-							res[symbolRenameReq{oldName, newName}]++
+							if reflect.TypeOf(rec).String() == "*ast.Ident" {
+								var name = ident.(*ast.Ident)
+								if name.Name != "_" {
+									oldName := prefix + d.Name.Name + "::" + name.Name
+									newName := enc.Encrypt(name.Name)
+									res[symbolRenameReq{oldName, newName}]++
+								}
+							}
 						}
 					} else if typeName == "*ast.DeclStmt" {
 						var statement = rec.(*ast.DeclStmt)
@@ -225,9 +234,11 @@ func methodRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 							// Ignore ast.BinaryExpr which is most likely created by this library as a string function.
 							if reflect.TypeOf(expr).String() == "*ast.Ident" {
 								var name = expr.(*ast.Ident)
-								oldName := prefix + d.Name.Name + "::" + name.Name
-								newName := enc.Encrypt(name.Name)
-								res[symbolRenameReq{oldName, newName}]++
+								if name.Obj != nil {
+									oldName := prefix + d.Name.Name + "::" + name.Name
+									newName := enc.Encrypt(name.Name)
+									res[symbolRenameReq{oldName, newName}]++
+								}
 							} else {
 								fmt.Println("%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%")
 								fmt.Println(reflect.TypeOf(expr))
