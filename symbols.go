@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"go/ast"
 	"go/build"
@@ -27,11 +28,13 @@ type symbolRenameReq struct {
 func ObfuscateSymbols(gopath string, enc *Encrypter) error {
 	removeDoNotEdit(gopath)
 
+	reverseLookupMap := map[string]string{}
+
 	renames, err := topLevelRenames(gopath, enc)
 	if err != nil {
 		return fmt.Errorf("top-level renames: %s", err)
 	}
-	if err := runRenames(gopath, renames); err != nil {
+	if err := runRenames(gopath, renames, reverseLookupMap); err != nil {
 		return fmt.Errorf("top-level renaming: %s", err)
 	}
 
@@ -39,7 +42,7 @@ func ObfuscateSymbols(gopath string, enc *Encrypter) error {
 	if err != nil {
 		return fmt.Errorf("method renames: %s", err)
 	}
-	if err := runRenames(gopath, renames); err != nil {
+	if err := runRenames(gopath, renames, reverseLookupMap); err != nil {
 		return fmt.Errorf("method renaming: %s", err)
 	}
 
@@ -47,25 +50,41 @@ func ObfuscateSymbols(gopath string, enc *Encrypter) error {
 	if err != nil {
 		return fmt.Errorf("top-level renames: %s", err)
 	}
-	if err := runRenames(gopath, renames); err != nil {
+	if err := runRenames(gopath, renames, reverseLookupMap); err != nil {
 		return fmt.Errorf("top-level renaming: %s", err)
+	}
+
+	jsonString, _ := json.Marshal(reverseLookupMap)
+	fileErr := ioutil.WriteFile(gopath+"/"+"map.json", jsonString, 0777)
+	if fileErr != nil {
+		// TODO: Consider this case.
+		return nil
 	}
 
 	return nil
 }
 
-func runRenames(gopath string, renames []symbolRenameReq) error {
+func runRenames(gopath string, renames []symbolRenameReq, m map[string]string) error {
 	ctx := build.Default
 	ctx.GOPATH = gopath
+
 	for _, r := range renames {
 		fmt.Println(r.OldName)
 		fmt.Println(r.NewName)
+
+		oldName := strings.Split(r.OldName, ".")[1]
+
+		if len(strings.Split(oldName, "::")) > 1 {
+			oldName = strings.Split(oldName, "::")[1]
+		}
+		m[r.NewName] = oldName
 		if err := rename.Main(&ctx, "", r.OldName, r.NewName); err != nil {
 			// Simply print this error for now.
 			// If anything seriously wrong happens, it causes a panic anyway.
 			fmt.Println(err)
 		}
 	}
+
 	return nil
 }
 
