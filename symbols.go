@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 
 	"golang.org/x/tools/refactor/importgraph"
@@ -76,6 +77,9 @@ func runRenames(gopath string, renames []symbolRenameReq, m map[string]string) e
 
 		if len(strings.Split(oldName, "::")) > 1 {
 			oldName = strings.Split(oldName, "::")[1]
+		}
+		if len(strings.Split(r.OldName, ".")) == 3 {
+			oldName = strings.Split(r.OldName, ".")[1] + "." + strings.Split(r.OldName, ".")[2]
 		}
 		m[r.NewName] = oldName
 		if err := rename.Main(&ctx, "", r.OldName, r.NewName); err != nil {
@@ -169,6 +173,14 @@ func topLevelRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 				for _, spec := range d.Specs {
 					switch spec := spec.(type) {
 					case *ast.TypeSpec:
+						if reflect.TypeOf(spec.Type).String() == "*ast.StructType" {
+							structType := spec.Type.(*ast.StructType)
+							for _, f := range structType.Fields.List {
+								for _, n := range f.Names {
+									addRes(pkgPath, spec.Name.Name+"."+n.Name)
+								}
+							}
+						}
 						addRes(pkgPath, spec.Name.Name)
 					case *ast.ValueSpec:
 						for _, name := range spec.Names {
@@ -352,6 +364,11 @@ func singleRenames(multiset map[symbolRenameReq]int) []symbolRenameReq {
 			res = append(res, x)
 		}
 	}
+
+	// Ensure depth first renaming.
+	sort.Slice(res, func(i, j int) bool {
+		return strings.Count(res[i].OldName, ".") > strings.Count(res[j].OldName, ".")
+	})
 	return res
 }
 
