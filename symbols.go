@@ -7,8 +7,8 @@ import (
 	"go/build"
 	"go/parser"
 	"go/token"
-	"io"
 	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -26,20 +26,19 @@ type symbolRenameReq struct {
 	NewName string
 }
 
-func ObfuscateSymbols(gopath string, enc *Encrypter) error {
+func ObfuscateSymbols(gopath string, n NameHasher) error {
 	removeDoNotEdit(gopath)
 
 	reverseLookupMap := map[string]string{}
 
-	renames, err := topLevelRenames(gopath, enc)
+	renames, err := topLevelRenames(gopath, n)
 	if err != nil {
 		return fmt.Errorf("top-level renames: %s", err)
 	}
 	if err := runRenames(gopath, renames, reverseLookupMap); err != nil {
 		return fmt.Errorf("top-level renaming: %s", err)
 	}
-
-	renames, err = methodRenames(gopath, enc)
+	renames, err = methodRenames(gopath, n)
 	if err != nil {
 		return fmt.Errorf("method renames: %s", err)
 	}
@@ -47,7 +46,7 @@ func ObfuscateSymbols(gopath string, enc *Encrypter) error {
 		return fmt.Errorf("method renaming: %s", err)
 	}
 
-	renames, err = topLevelParamRenames(gopath, enc)
+	renames, err = topLevelParamRenames(gopath, n)
 	if err != nil {
 		return fmt.Errorf("top-level renames: %s", err)
 	}
@@ -83,16 +82,15 @@ func runRenames(gopath string, renames []symbolRenameReq, m map[string]string) e
 		}
 		m[r.NewName] = oldName
 		if err := rename.Main(&ctx, "", r.OldName, r.NewName); err != nil {
-			// Simply print this error for now.
-			// If anything seriously wrong happens, it causes a panic anyway.
-			fmt.Println(err)
+			log.Println("Error running renames proceding...", err)
+			continue
 		}
 	}
 
 	return nil
 }
 
-func topLevelParamRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
+func topLevelParamRenames(gopath string, n NameHasher) ([]symbolRenameReq, error) {
 	srcDir := filepath.Join(gopath, "src")
 	res := map[symbolRenameReq]int{}
 	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
@@ -102,7 +100,7 @@ func topLevelParamRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, err
 		if info.IsDir() && containsUnsupportedCode(path) {
 			return filepath.SkipDir
 		}
-		if filepath.Ext(path) != GoExtension {
+		if !isGoFile(path) {
 			return nil
 		}
 		pkgPath, err := filepath.Rel(srcDir, filepath.Dir(path))
@@ -122,7 +120,7 @@ func topLevelParamRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, err
 						for _, name := range field.Names {
 							prefix := "\"" + pkgPath + "\"."
 							oldName := prefix + d.Name.Name + "::" + name.Name
-							newName := enc.Encrypt(name.Name)
+							newName := n.Hash(name.Name)
 							res[symbolRenameReq{oldName, newName}]++
 						}
 					}
@@ -134,13 +132,13 @@ func topLevelParamRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, err
 	return singleRenames(res), err
 }
 
-func topLevelRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
+func topLevelRenames(gopath string, n NameHasher) ([]symbolRenameReq, error) {
 	srcDir := filepath.Join(gopath, "src")
 	res := map[symbolRenameReq]int{}
 	addRes := func(pkgPath, name string) {
 		prefix := "\"" + pkgPath + "\"."
 		oldName := prefix + name
-		newName := enc.Encrypt(name)
+		newName := n.Hash(name)
 		res[symbolRenameReq{oldName, newName}]++
 	}
 	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
@@ -150,7 +148,7 @@ func topLevelRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 		if info.IsDir() && containsUnsupportedCode(path) {
 			return filepath.SkipDir
 		}
-		if filepath.Ext(path) != GoExtension {
+		if !isGoFile(path) {
 			return nil
 		}
 		pkgPath, err := filepath.Rel(srcDir, filepath.Dir(path))
@@ -195,7 +193,7 @@ func topLevelRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 	return singleRenames(res), err
 }
 
-func methodRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
+func methodRenames(gopath string, n NameHasher) ([]symbolRenameReq, error) {
 	exclude, err := interfaceMethods(gopath)
 	if err != nil {
 		return nil, err
@@ -210,7 +208,7 @@ func methodRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 		if info.IsDir() && containsUnsupportedCode(path) {
 			return filepath.SkipDir
 		}
-		if filepath.Ext(path) != GoExtension {
+		if !isGoFile(path) {
 			return nil
 		}
 		pkgPath, err := filepath.Rel(srcDir, filepath.Dir(path))
@@ -240,7 +238,7 @@ func methodRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 								var name = ident.(*ast.Ident)
 								if name.Name != "_" {
 									oldName := prefix + d.Name.Name + "::" + name.Name
-									newName := enc.Encrypt(name.Name)
+									newName := n.Hash(name.Name)
 									res[symbolRenameReq{oldName, newName}]++
 								}
 							}
@@ -253,7 +251,7 @@ func methodRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 							for _, name := range valueSpec.Names {
 								if name.Name != "_" {
 									oldName := prefix + d.Name.Name + "::" + name.Name
-									newName := enc.Encrypt(name.Name)
+									newName := n.Hash(name.Name)
 									res[symbolRenameReq{oldName, newName}]++
 								}
 							}
@@ -267,7 +265,7 @@ func methodRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 								var name = expr.(*ast.Ident)
 								if name.Obj != nil {
 									oldName := prefix + d.Name.Name + "::" + name.Name
-									newName := enc.Encrypt(name.Name)
+									newName := n.Hash(name.Name)
 									res[symbolRenameReq{oldName, newName}]++
 								}
 							} else {
@@ -294,7 +292,7 @@ func methodRenames(gopath string, enc *Encrypter) ([]symbolRenameReq, error) {
 						continue
 					}
 					oldName := receiver + "." + d.Name.Name
-					newName := enc.Encrypt(d.Name.Name)
+					newName := n.Hash(d.Name.Name)
 					res[symbolRenameReq{oldName, newName}]++
 				}
 			}
@@ -402,7 +400,7 @@ func containsCGO(dir string) bool {
 		return false
 	}
 	for _, item := range listing {
-		if filepath.Ext(item.Name()) == GoExtension {
+		if isGoFile(item.Name()) {
 			path := filepath.Join(dir, item.Name())
 			set := token.NewFileSet()
 			file, err := parser.ParseFile(set, path, nil, 0)
@@ -427,28 +425,32 @@ func removeDoNotEdit(dir string) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() || filepath.Ext(path) != GoExtension {
+		if info.IsDir() || !isGoFile(path) {
 			return nil
 		}
 
-		set := token.NewFileSet()
-		file, err := parser.ParseFile(set, path, nil, parser.ParseComments)
-		if err != nil {
-			return err
-		}
 		f, err := os.OpenFile(path, os.O_RDWR, 0755)
 		if err != nil {
 			return err
 		}
 		defer f.Close()
+
+		content, err := ioutil.ReadAll(f)
+		if err != nil {
+			return err
+		}
+
+		set := token.NewFileSet()
+		file, err := parser.ParseFile(set, path, content, parser.ParseComments)
+		if err != nil {
+			return err
+		}
+
 		for _, comment := range file.Comments {
 			data := make([]byte, comment.End()-comment.Pos())
-			if _, err := f.Seek(int64(comment.Pos()-1), io.SeekStart); err != nil {
-				return err
-			}
-			if _, err := io.ReadFull(f, data); err != nil {
-				return err
-			}
+			start := int(comment.Pos())
+			end := start + len(data)
+			data = content[start:end]
 			commentStr := string(data)
 			if strings.Contains(commentStr, "DO NOT EDIT") {
 				commentStr = strings.Replace(commentStr, "DO NOT EDIT", "XXXXXXXXXXX", -1)
@@ -457,7 +459,6 @@ func removeDoNotEdit(dir string) error {
 				}
 			}
 		}
-
 		return nil
 	})
 }
